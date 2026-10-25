@@ -42,6 +42,7 @@ impl<'a> RevisionManifestList {
         let mut revisions: HashMap<ExGuid, revision::Revision> = HashMap::new();
         let mut labels: HashMap<(Option<ExGuid>, u32), ExGuid> = HashMap::new();
 
+        let mut last_revision = None;
         let mut last_index = iterator.get_index();
         while let Some(current) = iterator.peek() {
             match current {
@@ -75,6 +76,7 @@ impl<'a> RevisionManifestList {
                             )
                         })?;
                     let id = parsed.id;
+                    last_revision = Some(id);
                     labels.insert((parsed.context, parsed.role), id);
                     if revisions.insert(id, parsed).is_some() {
                         return Err(ErrorKind::MalformedOneStoreData(
@@ -96,15 +98,38 @@ impl<'a> RevisionManifestList {
             last_index = index;
         }
 
-        let active_id = labels.get(&(None, ACTIVE_CONTENT_ROLE)).ok_or_else(|| {
-            ErrorKind::MalformedOneStoreData(
-                "Revision manifest list has no active revision in the default context".into(),
-            )
-        })?;
-        materialize_revision(*active_id, &revisions, roots, objects)?;
+        let active_id = match labels.get(&(None, ACTIVE_CONTENT_ROLE)) {
+            Some(id) => *id,
+            None => fallback_active_revision(&labels, last_revision).ok_or_else(|| {
+                ErrorKind::MalformedOneStoreData(
+                    "Revision manifest list has no active revision in the default context".into(),
+                )
+            })?,
+        };
+        materialize_revision(active_id, &revisions, roots, objects)?;
 
         Ok(())
     }
+}
+
+/// Picks the revision to use when the default context has no active revision,
+/// as in some sections written by OneNote while it was still syncing: the
+/// active revision of another context, or else the last revision in the list.
+#[allow(clippy::disallowed_macros)]
+fn fallback_active_revision(
+    labels: &HashMap<(Option<ExGuid>, u32), ExGuid>,
+    last_revision: Option<ExGuid>,
+) -> Option<ExGuid> {
+    let mut other_contexts: Vec<_> = labels
+        .iter()
+        .filter(|((context, role), _)| context.is_some() && *role == ACTIVE_CONTENT_ROLE)
+        .map(|(_, id)| *id)
+        .collect();
+    // Make the choice independent of the hash map's order.
+    other_contexts.sort_by_key(|id| (id.guid.to_string(), id.value));
+    let id = other_contexts.first().copied().or(last_revision)?;
+    log::warn!("no active revision in the default context, using revision {id:?}");
+    Some(id)
 }
 
 fn materialize_revision(

@@ -34,16 +34,20 @@ pub(crate) fn parse_page_series(
         .ok_or_else(|| ErrorKind::MalformedOneNoteData("page series object is missing".into()))?;
     let data = page_series_node::parse(object)?;
 
-    let pages = data
-        .page_spaces
-        .into_iter()
-        .map(|page_space_id| {
-            store
-                .object_space(page_space_id)
-                .ok_or_else(|| ErrorKind::MalformedOneNoteData("page space is missing".into()))
-        })
-        .map(|page_space| parse_page(page_space?, ctx))
-        .collect::<Result<_>>()?;
+    let mut pages = Vec::with_capacity(data.page_spaces.len());
+    for page_space_id in data.page_spaces {
+        // A section saved while OneNote was still syncing can list pages
+        // whose content is not in the file. Skip those instead of failing
+        // the whole section.
+        let Some(page_space) = store.object_space(page_space_id) else {
+            warn!(
+                ctx,
+                "page space {:?} is missing, skipping the page", page_space_id
+            );
+            continue;
+        };
+        pages.push(parse_page(page_space, ctx)?);
+    }
 
     Ok(PageSeries { pages })
 }
